@@ -2,6 +2,7 @@
  * ai-executor.ts
  * Centralized AI execution layer with provider fallback (Gemini -> Groq -> Mock).
  * Deep Merge & Array Coercion implemented to prevent LLM hallucinations.
+ * STRICT SCHEMA ENFORCEMENT ENABLED.
  */
 
 export interface Indicator { type: string; value: string; source?: string; confidence?: number }
@@ -17,6 +18,35 @@ export interface AgentPipelineResult {
   technical_report?: any
   raw_output?: string
 }
+
+// ── STRICT SCHEMA TEMPLATE FOR LLM ──
+const STRICT_SCHEMA = `
+You MUST return ONLY valid JSON matching this exact structure. Do NOT wrap it in markdown.
+{
+  "executive_report": {
+    "posture_score": <number 0-100 based on risk severity>,
+    "severity_summary": {
+      "critical": <number of critical findings>,
+      "high": <number of high findings>,
+      "medium": <number of medium findings>,
+      "low": <number of low findings>
+    },
+    "top_risk": "<string - describe the most critical threat/vulnerability>",
+    "action_required": "<string - what should the SOC do immediately?>"
+  },
+  "technical_report": {
+    "total_findings": <number - total sum of threats and risks>
+  },
+  "risk_register": [
+    { "asset_id": "<string>", "asset_name": "<string>", "risk_score": <number 0-100>, "severity_label": "<critical|high|medium|low>", "patch_available": <boolean>, "cve_id": "<string or null>", "mitre_tactic": "<string>", "cvss_score": <number>, "exploitability_score": <number>, "asset_criticality_score": <number>, "threat_intel_score": <number> }
+  ],
+  "threats": [
+    { "indicator_value": "<string>", "indicator_type": "<string>", "priority_score": <number 0-100>, "mitre_tactic": "<string>", "mitre_technique_id": "<string>" }
+  ],
+  "playbooks": [
+    { "incident_title": "<string>", "playbook": { "containment": ["<string step 1>"], "eradication": ["<string step 1>"] } }
+  ]
+}`;
 
 // 1. Safe JSON parser that strips out markdown code blocks
 function safeParse(text: string) {
@@ -45,7 +75,6 @@ function deepMergeFallback(mock: AgentPipelineResult, aiOutput: any): AgentPipel
       ...mock.executive_report,
       ...aiOutput.executive_report
     }
-    // If the AI completely forgot the score, keep the mock score so the UI doesn't crash
     if (aiOutput.executive_report.posture_score === undefined) {
       merged.executive_report.posture_score = mock.executive_report.posture_score
     }
@@ -111,7 +140,7 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
   const safeIndicators = indicators.slice(0, 5)
   const safeAssets = assets.slice(0, 5)
 
-  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
+  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)}.\n\n${STRICT_SCHEMA}`
   
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
     method: 'POST',
@@ -148,7 +177,7 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
   const safeAssets = assets.slice(0, 5)
 
   const systemPrompt = "You are a defensive cybersecurity SOC analyst. Output ONLY valid JSON. No markdown, no conversational text."
-  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
+  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}.\n\n${STRICT_SCHEMA}`
   
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
