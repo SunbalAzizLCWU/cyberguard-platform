@@ -6,6 +6,8 @@
 
 const AGENT_BASE_URL = process.env.AGENT_API_URL ?? 'http://localhost:8001'
 
+import { executeAgentPipeline, buildMockResult } from '@/lib/ai-executor'
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface ThreatIndicator {
@@ -128,31 +130,67 @@ export async function startAgentAnalysis(
     assets: Asset[],
     runId?: string
 ): Promise<AgentJobStatus> {
-    const res = await fetch(`${AGENT_BASE_URL}/api/agents/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ indicators, assets, run_id: runId }),
-    })
-
-    if (!res.ok) {
-        const err = await res.text()
-        throw new Error(`Agent server error ${res.status}: ${err}`)
+    // Minimal in-process job runner that preserves the external API contract.
+    // If USE_REAL_AI !== 'true', executor will return a mock result immediately.
+    const jobId = `cg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const created_at = new Date().toISOString()
+    const initial: AgentJobStatus = {
+        job_id: jobId,
+        status: 'queued',
+        created_at,
+        completed_at: null,
+        result: null,
+        error: null,
     }
 
-    return res.json()
+    const store = (global as any).__CG_AGENT_JOBS ||= new Map<string, AgentJobStatus>()
+    store.set(jobId, initial)
+
+    // Fire-and-forget pipeline processing
+    ;(async () => {
+        try {
+            // mark running
+            const running = { ...initial, status: 'running' as const }
+            store.set(jobId, running)
+
+            // Execute pipeline (Gemini -> Groq -> mock)
+            const result = await executeAgentPipeline(indicators, assets)
+
+            const completed_at = new Date().toISOString()
+            const done: AgentJobStatus = {
+                job_id: jobId,
+                status: 'completed',
+                created_at,
+                completed_at,
+                result,
+                error: null,
+            }
+            store.set(jobId, done)
+        } catch (e: any) {
+            const failed_at = new Date().toISOString()
+            const failed: AgentJobStatus = {
+                job_id: jobId,
+                status: 'failed',
+                created_at,
+                completed_at: failed_at,
+                result: null,
+                error: String(e?.message || e || 'Unknown error'),
+            }
+            store.set(jobId, failed)
+        }
+    })()
+
+    return initial
 }
 
 /**
  * Check the status/result of a pipeline job.
  */
 export async function getAgentJob(jobId: string): Promise<AgentJobStatus> {
-    const res = await fetch(`${AGENT_BASE_URL}/api/agents/jobs/${jobId}`)
-
-    if (!res.ok) {
-        throw new Error(`Agent job not found: ${jobId}`)
-    }
-
-    return res.json()
+    const store = (global as any).__CG_AGENT_JOBS ||= new Map<string, AgentJobStatus>()
+    const job = store.get(jobId)
+    if (!job) throw new Error(`Agent job not found: ${jobId}`)
+    return job
 }
 
 /**
