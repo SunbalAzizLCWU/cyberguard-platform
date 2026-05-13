@@ -81,16 +81,16 @@ async function saveResultsToSupabase(jobId: string, result: any) {
     for (const r of riskRegister) {
         const { error } = await supabase.from('RiskAnalysis').insert({
             id:             `risk-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            assetId:        r.asset_id    ?? 'unknown',
-            assetName:      r.asset_name  ?? 'Unknown Asset',
+            assetId:        r.asset_id   ?? 'unknown',
+            assetName:      r.asset_name ?? 'Unknown Asset',
             riskLevel:      Math.round(Math.min(100, r.risk_score ?? 0)),
-            cvssScore:      r.cvss_score  ?? null,
+            cvssScore:      r.cvss_score ?? null,
             exploitability: exploitabilityLabel(r.exploitability_score ?? 0),
             patchAvailable: r.patch_available ?? false,
             scoreBreakdown: `CVSS:${r.cvss_score} | Exploit:${r.exploitability_score} | Asset:${r.asset_criticality_score} | ThreatIntel:${r.threat_intel_score}`,
             mitreAttack:    r.mitre_tactic ?? null,
             created:        now,
-            updated:        now,
+            updatedAt:      now, // <-- FIXED: Changed from 'updated' to 'updatedAt' to match your Supabase schema
         })
         if (!error) summary.risks++
         else console.error('[Supabase] RiskAnalysis insert error:', error.message)
@@ -176,7 +176,7 @@ async function pushToSocket(result: any) {
                 event: 'agent:complete',
                 data: {
                     result: {
-                        threats:     result.threats       ?? [],
+                        threats:     result.threats      ?? [],
                         risk_scores: result.risk_register ?? [],
                         metrics: {
                             postureScore:   execReport.posture_score                ?? 0,
