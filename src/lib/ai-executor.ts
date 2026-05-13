@@ -2,7 +2,6 @@
  * ai-executor.ts
  * Centralized AI execution layer with provider fallback (Gemini -> Groq -> Mock).
  * Controlled by USE_REAL_AI, GEMINI_API_KEY, GROQ_API_KEY env vars.
- * Designed to be minimal, safe, and to preserve expected result shape.
  */
 
 export interface Indicator { type: string; value: string; source?: string; confidence?: number }
@@ -19,10 +18,11 @@ export interface AgentPipelineResult {
   raw_output?: string
 }
 
-// Safe JSON parser with fallback
+// Safe JSON parser that strips out markdown code blocks if the AI includes them
 function safeParse(text: string) {
   try {
-    return JSON.parse(text)
+    const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim()
+    return JSON.parse(cleanText)
   } catch {
     return null
   }
@@ -60,7 +60,7 @@ function buildMockResult(indicators: Indicator[], assets: Asset[]): AgentPipelin
     })),
     playbooks: [],
     executive_report: {
-      posture_score: Math.floor(Math.random() * 40) + 60,
+      posture_score: Math.floor(Math.random() * 40) + 60, // Random score for mock
       severity_summary: { critical: 0, high: 0, medium: indicators.length, low: assets.length },
       top_risk: indicators[Math.floor(Math.random() * indicators.length)]?.value ?? '',
       action_required: 'Validate findings and patch where applicable',
@@ -71,52 +71,37 @@ function buildMockResult(indicators: Indicator[], assets: Asset[]): AgentPipelin
 }
 
 async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
-  const key = process.env.GEMINI_API_KEY
+  const key = process.env.GEMINI_API_KEY?.trim()
   if (!key) throw new Error('GEMINI_API_KEY missing')
 
-  // Prevent token explosion by limiting inputs
   const safeIndicators = indicators.slice(0, 5)
   const safeAssets = assets.slice(0, 5)
 
-  // This is a best-effort wrapper — keep it safe and timeout quickly
-  const prompt = `Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)} and return a JSON object with executive_report, risk_register, threats, playbooks.`
+  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)} and return ONLY a JSON object with executive_report, risk_register, threats, playbooks.`
+  
   try {
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${key}', {
+    // FIXED: Using backticks for proper URL string interpolation
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt
-            }
-          ]
-        }
-      ]
-    }),
-      // no signal here — rely on default network timeouts in Node/hosting
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { response_mime_type: "application/json" } // Force JSON mode
+      }),
     })
 
-    if (!res.ok) throw new Error(`Gemini error ${res.status}`)
+    if (!res.ok) {
+      const errText = await res.text()
+      throw new Error(`Gemini API Error ${res.status}: ${errText}`)
+    }
 
     const body = await res.json()
-    // Extract JSON from Gemini response with proper validation
     const text = body?.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!text) {
-      throw new Error('Invalid Gemini response structure')
-    }
+    if (!text) throw new Error('Invalid Gemini response structure')
 
     const parsed = safeParse(String(text))
-    if (parsed) {
-      return {
-        ...buildMockResult(safeIndicators, safeAssets),
-        ...parsed,
-        raw_output: text
-      }
-    }
+    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
 
-    // If provider returned plain text, wrap it
     return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
   } catch (e) {
     throw new Error(`Gemini provider failed: ${String(e)}`)
@@ -124,56 +109,52 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
 }
 
 async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
-  const key = process.env.GROQ_API_KEY
+  const key = process.env.GROQ_API_KEY?.trim()
   if (!key) throw new Error('GROQ_API_KEY missing')
 
-  // Prevent token explosion by limiting inputs
   const safeIndicators = indicators.slice(0, 5)
   const safeAssets = assets.slice(0, 5)
 
-  const prompt = `Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)} and emit JSON with executive_report, risk_register, threats, playbooks.`
+  const systemPrompt = "You are a defensive cybersecurity SOC analyst. Output ONLY valid JSON. No markdown, no conversational text."
+  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report", "risk_register", "threats", "playbooks".`
+  
   try {
-    const res = await fetch(
-  "https://api.groq.com/openai/v1/chat/completions",
-  {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "llama3-8b-8192",
-      messages: [
-        { role: "user", content: prompt }
-      ]
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" } // Force JSON mode
+      })
     })
-  }
-)
 
-    if (!res.ok) throw new Error(`Groq error ${res.status}`)
+    if (!res.ok) {
+      const errText = await res.text()
+      throw new Error(`Groq API Error ${res.status}: ${errText}`)
+    }
+    
     const body = await res.json()
     const text = body?.choices?.[0]?.message?.content
-    if (!text) {
-      throw new Error('Invalid Groq response structure')
-    }
+    if (!text) throw new Error('Invalid Groq response structure')
 
     const parsed = safeParse(String(text))
-    if (parsed) {
-      return {
-        ...buildMockResult(safeIndicators, safeAssets),
-        ...parsed,
-        raw_output: text
-      }
-    }
+    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
 
     return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
   } catch (e) {
     throw new Error(`Groq provider failed: ${String(e)}`)
   }
 }
+
 export async function executeAgentPipeline(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
   console.log("USE_REAL_AI:", process.env.USE_REAL_AI)
-
   const useReal = String(process.env.USE_REAL_AI || '').toLowerCase() === 'true'
 
   if (!useReal) {
@@ -203,7 +184,6 @@ export async function executeAgentPipeline(indicators: Indicator[], assets: Asse
 
       // Final fallback
       console.log("⚠️ Using FINAL MOCK fallback")
-
       const mock = buildMockResult(indicators, assets)
       mock.raw_output = `Fallback mock; Gemini error: ${String(e1)}; Groq error: ${String(e2)}`
       return mock

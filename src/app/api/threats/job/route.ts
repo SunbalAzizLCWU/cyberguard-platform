@@ -70,7 +70,7 @@ async function saveResultsToSupabase(jobId: string, result: any) {
             cveId:       t.indicator_type === 'cve' ? t.indicator_value : null,
             ipAddress:   t.indicator_type === 'ip'  ? t.indicator_value : null,
             detected:    now,
-            updated:     now,
+            updatedAt:     now,
         })
         if (!error) summary.threats++
         else console.error('[Supabase] Threat insert error:', error.message)
@@ -108,7 +108,7 @@ async function saveResultsToSupabase(jobId: string, result: any) {
             status:      'open',
             assignee:    'Unassigned',
             created:     now,
-            updated:     now,
+            updatedAt:     now,
         })
         if (!error) summary.incidents++
         else console.error('[Supabase] Incident insert error:', error.message)
