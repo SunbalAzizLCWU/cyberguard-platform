@@ -147,7 +147,10 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { response_mime_type: "application/json" }
+      generationConfig: { response_mime_type: "application/json", 
+        temperature: 0,
+      }
+      
     }),
   })
 
@@ -187,6 +190,7 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
     },
     body: JSON.stringify({
       model: "llama-3.3-70b-versatile",
+      temperature: 0,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
