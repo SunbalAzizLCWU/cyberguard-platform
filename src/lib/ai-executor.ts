@@ -18,10 +18,62 @@ export interface AgentPipelineResult {
   raw_output?: string
 }
 
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function deepMerge<T>(base: T, patch: any): T {
+  if (!isPlainObject(base) || !isPlainObject(patch)) {
+    return (patch ?? base) as T
+  }
+
+  const merged: Record<string, any> = { ...base }
+
+  for (const [key, value] of Object.entries(patch)) {
+    const current = (base as Record<string, any>)[key]
+    if (isPlainObject(current) && isPlainObject(value)) {
+      merged[key] = deepMerge(current, value)
+      continue
+    }
+
+    merged[key] = value ?? current
+  }
+
+  return merged as T
+}
+
+function sanitizeOutput(output: any) {
+  const sanitizeList = (value: any) => {
+    if (Array.isArray(value)) return value
+    if (isPlainObject(value)) return Object.values(value)
+    return []
+  }
+
+  if (!isPlainObject(output)) {
+    return output
+  }
+
+  return {
+    ...output,
+    threats: sanitizeList(output.threats),
+    vulnerabilities: sanitizeList(output.vulnerabilities),
+    risk_register: sanitizeList(output.risk_register),
+    playbooks: sanitizeList(output.playbooks),
+  }
+}
+
+function stripMarkdownFence(text: string) {
+  return text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
+}
+
 // Safe JSON parser that strips out markdown code blocks if the AI includes them
 function safeParse(text: string) {
   try {
-    const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim()
+    const cleanText = stripMarkdownFence(text)
     return JSON.parse(cleanText)
   } catch {
     return null
@@ -60,12 +112,17 @@ function buildMockResult(indicators: Indicator[], assets: Asset[]): AgentPipelin
     })),
     playbooks: [],
     executive_report: {
-      posture_score: Math.floor(Math.random() * 40) + 60, // Random score for mock
+      posture_score: Math.floor(Math.random() * 40) + 60,
       severity_summary: { critical: 0, high: 0, medium: indicators.length, low: assets.length },
-      top_risk: indicators[Math.floor(Math.random() * indicators.length)]?.value ?? '',
+      top_risk: indicators[Math.floor(Math.random() * Math.max(indicators.length, 1))]?.value ?? '',
       action_required: 'Validate findings and patch where applicable',
     },
-    technical_report: { total_findings: indicators.length, cves_detected: [], assets_at_risk: assets.map(a => a.name), immediate_patches: [] },
+    technical_report: {
+      total_findings: indicators.length,
+      cves_detected: [],
+      assets_at_risk: assets.map(a => a.name),
+      immediate_patches: [],
+    },
     raw_output: 'mock',
   }
 }
@@ -77,8 +134,21 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
   const safeIndicators = indicators.slice(0, 5)
   const safeAssets = assets.slice(0, 5)
 
-  // FIXED: Explicitly asking for arrays
-  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
+  const prompt = [
+    'You are a defensive cybersecurity AI.',
+    'Return ONLY valid JSON.',
+    'Do not wrap the response in markdown code fences.',
+    'Do not include commentary, explanations, or prose.',
+    'Emit a JSON object with these keys:',
+    '- executive_report: object',
+    '- technical_report: object',
+    '- threats: array',
+    '- vulnerabilities: array',
+    '- risk_register: array',
+    '- playbooks: array',
+    `Indicators: ${JSON.stringify(safeIndicators)}`,
+    `Assets: ${JSON.stringify(safeAssets)}`,
+  ].join('\n')
   
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
@@ -100,7 +170,13 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
     if (!text) throw new Error('Invalid Gemini response structure')
 
     const parsed = safeParse(String(text))
-    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
+    if (parsed) {
+      const sanitized = sanitizeOutput(parsed)
+      return {
+        ...deepMerge(buildMockResult(safeIndicators, safeAssets), sanitized),
+        raw_output: text,
+      }
+    }
 
     return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
   } catch (e) {
@@ -116,8 +192,21 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
   const safeAssets = assets.slice(0, 5)
 
   const systemPrompt = "You are a defensive cybersecurity SOC analyst. Output ONLY valid JSON. No markdown, no conversational text."
-  // FIXED: Explicitly asking for arrays
-  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
+  const userPrompt = [
+    'Analyze the following cybersecurity inputs.',
+    'Return ONLY valid JSON.',
+    'Do not use markdown code fences.',
+    'Do not include commentary or explanations.',
+    'Emit a JSON object with these keys:',
+    '- executive_report: object',
+    '- technical_report: object',
+    '- threats: array',
+    '- vulnerabilities: array',
+    '- risk_register: array',
+    '- playbooks: array',
+    `Indicators: ${JSON.stringify(safeIndicators)}`,
+    `Assets: ${JSON.stringify(safeAssets)}`,
+  ].join('\n')
   
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -146,7 +235,13 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
     if (!text) throw new Error('Invalid Groq response structure')
 
     const parsed = safeParse(String(text))
-    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
+        if (parsed) {
+          const sanitized = sanitizeOutput(parsed)
+          return {
+            ...deepMerge(buildMockResult(safeIndicators, safeAssets), sanitized),
+            raw_output: text,
+          }
+        }
 
     return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
   } catch (e) {
