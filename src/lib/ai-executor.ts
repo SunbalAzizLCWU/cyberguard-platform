@@ -1,194 +1,181 @@
-/**
- * ai-executor.ts
- * Centralized AI execution layer with provider fallback (Gemini -> Groq -> Mock).
- * Controlled by USE_REAL_AI, GEMINI_API_KEY, GROQ_API_KEY env vars.
- */
+import { NextRequest, NextResponse } from 'next/server'
+import { executeAgentPipeline } from '@/lib/ai-executor'
+import { createClient } from '@supabase/supabase-js'
 
-export interface Indicator { type: string; value: string; source?: string; confidence?: number }
-export interface Asset { id: string; name: string; [k: string]: any }
+const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } }
+)
 
-export interface AgentPipelineResult {
-  metadata: { run_id: string; processed_at: string; indicators_processed: number; assets_scanned: number }
-  threats?: any[]
-  vulnerabilities?: any[]
-  risk_register?: any[]
-  playbooks?: any[]
-  executive_report?: any
-  technical_report?: any
-  raw_output?: string
-}
+// Force Vercel to allow this function to run for up to 60 seconds
+export const maxDuration = 60
 
-// Safe JSON parser that strips out markdown code blocks if the AI includes them
-function safeParse(text: string) {
-  try {
-    const cleanText = text.replace(/```json/gi, '').replace(/```/g, '').trim()
-    return JSON.parse(cleanText)
-  } catch {
-    return null
-  }
-}
-
-// Simple deterministic mock result to preserve API contract
-function buildMockResult(indicators: Indicator[], assets: Asset[]): AgentPipelineResult {
-  const now = new Date().toISOString()
-  return {
-    metadata: {
-      run_id: `mock-${Date.now()}`,
-      processed_at: now,
-      indicators_processed: indicators.length,
-      assets_scanned: assets.length,
-    },
-    threats: indicators.map((i, idx) => ({
-      indicator_value: i.value,
-      indicator_type: i.type || 'unknown',
-      confidence_score: i.confidence ?? 50,
-      mitre_tactic: 'unknown',
-      mitre_technique_id: `T${1000 + idx}`,
-      active_exploitation: false,
-      priority_score: 50,
-    })),
-    risk_register: assets.map((a, idx) => ({
-      asset_id: a.id,
-      asset_name: a.name,
-      cve_id: null,
-      risk_score: 30 + idx,
-      severity_label: 'medium',
-      cvss_score: null,
-      exploitability_score: 0,
-      asset_criticality_score: 50,
-      threat_intel_score: 10,
-    })),
-    playbooks: [],
-    executive_report: {
-      posture_score: Math.floor(Math.random() * 40) + 60, // Random score for mock
-      severity_summary: { critical: 0, high: 0, medium: indicators.length, low: assets.length },
-      top_risk: indicators[Math.floor(Math.random() * indicators.length)]?.value ?? '',
-      action_required: 'Validate findings and patch where applicable',
-    },
-    technical_report: { total_findings: indicators.length, cves_detected: [], assets_at_risk: assets.map(a => a.name), immediate_patches: [] },
-    raw_output: 'mock',
-  }
-}
-
-async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
-  const key = process.env.GEMINI_API_KEY?.trim()
-  if (!key) throw new Error('GEMINI_API_KEY missing')
-
-  const safeIndicators = indicators.slice(0, 5)
-  const safeAssets = assets.slice(0, 5)
-
-  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)} and return ONLY a JSON object with executive_report, risk_register, threats, playbooks.`
-  
-  try {
-    // FIXED: Using backticks for proper URL string interpolation
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { response_mime_type: "application/json" } // Force JSON mode
-      }),
-    })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      throw new Error(`Gemini API Error ${res.status}: ${errText}`)
-    }
-
-    const body = await res.json()
-    const text = body?.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!text) throw new Error('Invalid Gemini response structure')
-
-    const parsed = safeParse(String(text))
-    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
-
-    return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
-  } catch (e) {
-    throw new Error(`Gemini provider failed: ${String(e)}`)
-  }
-}
-
-async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
-  const key = process.env.GROQ_API_KEY?.trim()
-  if (!key) throw new Error('GROQ_API_KEY missing')
-
-  const safeIndicators = indicators.slice(0, 5)
-  const safeAssets = assets.slice(0, 5)
-
-  const systemPrompt = "You are a defensive cybersecurity SOC analyst. Output ONLY valid JSON. No markdown, no conversational text."
-  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report", "risk_register", "threats", "playbooks".`
-  
-  try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ],
-        response_format: { type: "json_object" } // Force JSON mode
-      })
-    })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      throw new Error(`Groq API Error ${res.status}: ${errText}`)
-    }
-    
-    const body = await res.json()
-    const text = body?.choices?.[0]?.message?.content
-    if (!text) throw new Error('Invalid Groq response structure')
-
-    const parsed = safeParse(String(text))
-    if (parsed) return { ...buildMockResult(safeIndicators, safeAssets), ...parsed, raw_output: text }
-
-    return { ...buildMockResult(safeIndicators, safeAssets), raw_output: String(text) }
-  } catch (e) {
-    throw new Error(`Groq provider failed: ${String(e)}`)
-  }
-}
-
-export async function executeAgentPipeline(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
-  console.log("USE_REAL_AI:", process.env.USE_REAL_AI)
-  const useReal = String(process.env.USE_REAL_AI || '').toLowerCase() === 'true'
-
-  if (!useReal) {
-    console.log("⚠️ Using MOCK (USE_REAL_AI is not true)")
-    return buildMockResult(indicators, assets)
-  }
-
-  console.log("✅ REAL AI MODE ENABLED")
-
-  // Try Gemini first
-  try {
-    console.log("🚀 Trying Gemini...")
-    const result = await tryGemini(indicators, assets)
-    console.log("✅ Gemini SUCCESS")
-    return result
-  } catch (e1) {
-    console.log("❌ Gemini FAILED:", e1)
-
-    // Try Groq
+export async function POST(req: NextRequest) {
     try {
-      console.log("🚀 Trying Groq...")
-      const result = await tryGroq(indicators, assets)
-      console.log("✅ Groq SUCCESS")
-      return result
-    } catch (e2) {
-      console.log("❌ Groq FAILED:", e2)
+        const body = await req.json()
+        const { indicators, assets } = body
 
-      // Final fallback
-      console.log("⚠️ Using FINAL MOCK fallback")
-      const mock = buildMockResult(indicators, assets)
-      mock.raw_output = `Fallback mock; Gemini error: ${String(e1)}; Groq error: ${String(e2)}`
-      return mock
+        // 1. Run the AI Pipeline synchronously (Server stays awake)
+        const result = await executeAgentPipeline(indicators || [], assets || [])
+        const jobId = `cg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+        // 2. Save directly to Supabase immediately after AI finishes
+        await saveResultsToSupabase(jobId, result)
+        
+        // 3. Emit socket event
+        await pushToSocket(result)
+
+        // 4. Return the completed job to the UI
+        return NextResponse.json({ 
+            success: true,
+            job_id: jobId, 
+            job: {
+                status: 'completed',
+                result: result
+            }
+        })
+    } catch (error: any) {
+        console.error('[API] Threat Pipeline Error:', error)
+        return NextResponse.json({ success: false, error: error.message }, { status: 500 })
     }
-  }
 }
 
-export { buildMockResult }
+async function saveResultsToSupabase(jobId: string, result: any) {
+    const now = new Date().toISOString()
+    const summary = { threats: 0, risks: 0, incidents: 0, playbooks: 0, reports: 0 }
+
+    const threats: any[] = result.threats ?? []
+    for (const t of threats) {
+        const { error } = await supabase.from('Threat').insert({
+            id:          `thr-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            title:       `[AI] ${t.indicator_value ?? 'Unknown Indicator'}`,
+            description: `MITRE: ${t.mitre_tactic ?? 'Unknown'} (${t.mitre_technique_id ?? 'N/A'}) — detected by AI pipeline`,
+            severity:    priorityToSeverity(t.priority_score ?? 50),
+            status:      'active',
+            source:      'AI Agent',
+            cveId:       t.indicator_type === 'cve' ? t.indicator_value : null,
+            ipAddress:   t.indicator_type === 'ip'  ? t.indicator_value : null,
+            detected:    now,
+            updatedAt:   now,
+        })
+        if (!error) summary.threats++
+    }
+
+    const riskRegister: any[] = result.risk_register ?? []
+    for (const r of riskRegister) {
+        const { error } = await supabase.from('RiskAnalysis').insert({
+            id:             `risk-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            assetId:        r.asset_id   ?? 'unknown',
+            assetName:      r.asset_name ?? 'Unknown Asset',
+            riskLevel:      Math.round(Math.min(100, r.risk_score ?? 0)),
+            cvssScore:      r.cvss_score ?? null,
+            exploitability: exploitabilityLabel(r.exploitability_score ?? 0),
+            patchAvailable: r.patch_available ?? false,
+            scoreBreakdown: `CVSS:${r.cvss_score} | Exploit:${r.exploitability_score} | Asset:${r.asset_criticality_score} | ThreatIntel:${r.threat_intel_score}`,
+            mitreAttack:    r.mitre_tactic ?? null,
+            created:        now,
+            updatedAt:      now, 
+        })
+        if (!error) summary.risks++
+    }
+
+    const highPlusFindings = riskRegister.filter(r => (r.risk_score ?? 0) >= 50)
+    for (const r of highPlusFindings) {
+        const { error } = await supabase.from('Incident').insert({
+            id:          `inc-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            incidentId:  `INC-AI-${Date.now()}`,
+            title:       `[AI] ${r.cve_id ?? 'Vulnerability'} on ${r.asset_name ?? 'Unknown Asset'}`,
+            description: `Risk score ${r.risk_score}/100 (${r.severity_label}). MITRE: ${r.mitre_tactic ?? 'N/A'}. Auto-created by AI agent pipeline. Patch available: ${r.patch_available ? 'Yes' : 'No'}.`,
+            severity:    r.severity_label?.toLowerCase() ?? 'high',
+            status:      'open',
+            assignee:    'Unassigned',
+            created:     now,
+            updatedAt:   now,
+        })
+        if (!error) summary.incidents++
+    }
+
+    const playbooks: any[] = result.playbooks ?? []
+    for (const p of playbooks) {
+        const { error } = await supabase.from('Playbook').insert({
+            id:          `pb-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            title:       p.incident_title ?? `[AI] ${p.cve_id ?? 'Threat'} Response Playbook`,
+            description: p.incident_summary ?? 'Auto-generated by CyberGuard AI Incident Response Agent',
+            category:    'AI Generated',
+            content:     p.playbook ?? {},
+            cveId:       p.cve_id ?? null,
+            lastUpdated: now,
+            created:     now,
+        })
+        if (!error) summary.playbooks++
+    }
+
+    const execReport = result.executive_report ?? {}
+    const techReport = result.technical_report ?? {}
+    const compReport = result.compliance_report ?? {}
+
+    if (execReport.top_risk || techReport.total_findings) {
+        const { error } = await supabase.from('Report').insert({
+            id:        `rep-agent-${jobId}`,
+            title:     `AI Analysis Report — ${new Date().toLocaleDateString('en-US', { dateStyle: 'medium' })}`,
+            type:      'executive',
+            status:    'final',
+            content:   {
+                executive_report:  execReport,
+                technical_report:  techReport,
+                compliance_report: compReport,
+            },
+            jobId:     jobId,
+            generated: now,
+        })
+        if (!error) summary.reports++
+    }
+
+    return summary
+}
+
+async function pushToSocket(result: any) {
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'
+    const execReport = result.executive_report ?? {}
+
+    try {
+        await fetch(`${appUrl}/api/internal/socket-emit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                event: 'agent:complete',
+                data: {
+                    result: {
+                        threats:     result.threats      ?? [],
+                        risk_scores: result.risk_register ?? [],
+                        metrics: {
+                            postureScore:   execReport.posture_score                ?? 0,
+                            criticalCount:  execReport.severity_summary?.critical   ?? 0,
+                            highCount:      execReport.severity_summary?.high       ?? 0,
+                            totalFindings:  result.technical_report?.total_findings ?? 0,
+                            topRisk:        execReport.top_risk                     ?? '',
+                            actionRequired: execReport.action_required              ?? '',
+                        },
+                    },
+                },
+            }),
+        })
+    } catch (e) {
+        // Silently ignore socket errors
+    }
+}
+
+function priorityToSeverity(score: number): string {
+    if (score >= 80) return 'critical'
+    if (score >= 60) return 'high'
+    if (score >= 40) return 'medium'
+    return 'low'
+}
+
+function exploitabilityLabel(score: number): string {
+    if (score >= 9) return 'PUBLIC'
+    if (score >= 5) return 'POC_ONLY'
+    if (score >= 1) return 'THEORETICAL'
+    return 'NONE'
+}

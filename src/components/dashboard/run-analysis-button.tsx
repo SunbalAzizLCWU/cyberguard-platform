@@ -18,7 +18,6 @@ const PIPELINE_STEPS = [
     'Reporting',
 ]
 
-// Sample indicators & assets sent to the pipeline
 const SAMPLE_INDICATORS = [
     { type: 'cve', value: 'CVE-2021-44228', source: 'NVD', confidence: 100 },
     { type: 'ip', value: '45.33.32.156', source: 'OTX', confidence: 85 },
@@ -56,10 +55,8 @@ export function RunAnalysisButton() {
     const [errorMsg, setErrorMsg] = useState<string>('')
     const [expanded, setExpanded] = useState(false)
     const [elapsed, setElapsed] = useState(0)
-    const pollRef = useRef<NodeJS.Timeout | null>(null)
     const timerRef = useRef<NodeJS.Timeout | null>(null)
 
-    // Elapsed timer
     useEffect(() => {
         if (phase === 'starting' || phase === 'polling') {
             timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
@@ -70,11 +67,9 @@ export function RunAnalysisButton() {
         return () => { if (timerRef.current) clearInterval(timerRef.current) }
     }, [phase])
 
-    // Advance step visuals based on elapsed time (approximate)
     useEffect(() => {
         if (phase !== 'polling') return
-        // Each task takes roughly 15-20s; simulate step progression
-        const stepIndex = Math.min(Math.floor(elapsed / 18), PIPELINE_STEPS.length - 1)
+        const stepIndex = Math.min(Math.floor(elapsed / 4), PIPELINE_STEPS.length - 1)
         setSteps(prev => prev.map((s, i) => ({
             ...s,
             status: i < stepIndex ? 'done' : i === stepIndex ? 'running' : 'waiting',
@@ -89,7 +84,9 @@ export function RunAnalysisButton() {
         setExpanded(true)
 
         try {
-            // 1. Trigger pipeline
+            setPhase('polling') // Start UI animation timer
+            
+            // Send request and WAIT for Groq + Supabase to finish saving
             const res = await fetch('/api/threats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -99,37 +96,22 @@ export function RunAnalysisButton() {
                 }),
             })
 
-            if (!res.ok) {
-                const err = await res.json()
-                throw new Error(err.error || `HTTP ${res.status}`)
+            const data = await res.json()
+
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || `HTTP Error ${res.status}`)
             }
 
-            const { job_id } = await res.json()
-            setJobId(job_id)
-            setPhase('polling')
+            const job = data.job
+            setJobId(data.job_id)
 
-            // 2. Poll for completion
-            pollRef.current = setInterval(async () => {
-                try {
-                    const pollRes = await fetch(`/api/threats/job?jobId=${job_id}`)
-                    const data = await pollRes.json()
-                    const job = data.job
-
-                    if (job?.status === 'completed') {
-                        clearInterval(pollRef.current!)
-                        setSteps(PIPELINE_STEPS.map(label => ({ label, status: 'done' })))
-                        setResult(job.result)
-                        setPhase('done')
-                    } else if (job?.status === 'failed') {
-                        clearInterval(pollRef.current!)
-                        throw new Error(job.error || 'Pipeline failed')
-                    }
-                } catch (pollErr: any) {
-                    clearInterval(pollRef.current!)
-                    setErrorMsg(pollErr.message)
-                    setPhase('error')
-                }
-            }, 4000)
+            if (job?.status === 'completed') {
+                setSteps(PIPELINE_STEPS.map(label => ({ label, status: 'done' })))
+                setResult(job.result)
+                setPhase('done')
+            } else {
+                throw new Error('Pipeline returned unexpected status')
+            }
 
         } catch (err: any) {
             setErrorMsg(err.message)
@@ -138,7 +120,6 @@ export function RunAnalysisButton() {
     }
 
     function reset() {
-        if (pollRef.current) clearInterval(pollRef.current)
         setPhase('idle')
         setJobId(null)
         setResult(null)
@@ -180,7 +161,6 @@ export function RunAnalysisButton() {
                     )}
                 </button>
 
-                {/* Expand/collapse panel toggle */}
                 {(isRunning || phase === 'done' || phase === 'error') && (
                     <button
                         onClick={() => setExpanded(e => !e)}
@@ -195,7 +175,6 @@ export function RunAnalysisButton() {
             {/* ── Pipeline Progress Panel ── */}
             {expanded && (
                 <div className="mt-4 rounded-xl border border-slate-700/60 bg-slate-900/80 backdrop-blur-sm overflow-hidden">
-                    {/* Header */}
                     <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/40">
                         <div className="flex items-center gap-2">
                             <Shield className="w-4 h-4 text-emerald-400" />
@@ -208,7 +187,6 @@ export function RunAnalysisButton() {
                         )}
                     </div>
 
-                    {/* Step list */}
                     <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-2">
                         {steps.map((step, i) => (
                             <div
@@ -239,14 +217,12 @@ export function RunAnalysisButton() {
                         ))}
                     </div>
 
-                    {/* Error message */}
                     {phase === 'error' && (
                         <div className="mx-4 mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20">
                             <p className="text-xs text-red-400 wrap-break-word">{errorMsg}</p>
                         </div>
                     )}
 
-                    {/* Results summary */}
                     {phase === 'done' && result && (
                         <div className="mx-4 mb-3 px-3 py-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20 space-y-2">
                             {result.executive_report && (
@@ -287,7 +263,6 @@ export function RunAnalysisButton() {
                         </div>
                     )}
 
-                    {/* Footer timing */}
                     <div className="px-4 py-2 border-t border-slate-700/40 flex items-center justify-between">
                         <div className="flex items-center gap-1">
                             <Zap className="w-3 h-3 text-slate-500" />
@@ -306,4 +281,3 @@ export function RunAnalysisButton() {
         </div>
     )
 }
-
