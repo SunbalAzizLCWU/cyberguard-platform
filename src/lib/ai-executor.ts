@@ -60,9 +60,9 @@ function buildMockResult(indicators: Indicator[], assets: Asset[]): AgentPipelin
     })),
     playbooks: [],
     executive_report: {
-      posture_score: Math.min(100, 60 + indicators.length),
+      posture_score: Math.floor(Math.random() * 40) + 60,
       severity_summary: { critical: 0, high: 0, medium: indicators.length, low: assets.length },
-      top_risk: indicators[0]?.value ?? '',
+      top_risk: indicators[Math.floor(Math.random() * indicators.length)]?.value ?? '',
       action_required: 'Validate findings and patch where applicable',
     },
     technical_report: { total_findings: indicators.length, cves_detected: [], assets_at_risk: assets.map(a => a.name), immediate_patches: [] },
@@ -171,22 +171,39 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
     throw new Error(`Groq provider failed: ${String(e)}`)
   }
 }
-
 export async function executeAgentPipeline(indicators: Indicator[], assets: Asset[]): Promise<AgentPipelineResult> {
+  console.log("USE_REAL_AI:", process.env.USE_REAL_AI)
+
   const useReal = String(process.env.USE_REAL_AI || '').toLowerCase() === 'true'
 
   if (!useReal) {
+    console.log("⚠️ Using MOCK (USE_REAL_AI is not true)")
     return buildMockResult(indicators, assets)
   }
 
-  // Try Gemini first, then Groq, then mock
+  console.log("✅ REAL AI MODE ENABLED")
+
+  // Try Gemini first
   try {
-    return await tryGemini(indicators, assets)
+    console.log("🚀 Trying Gemini...")
+    const result = await tryGemini(indicators, assets)
+    console.log("✅ Gemini SUCCESS")
+    return result
   } catch (e1) {
+    console.log("❌ Gemini FAILED:", e1)
+
+    // Try Groq
     try {
-      return await tryGroq(indicators, assets)
+      console.log("🚀 Trying Groq...")
+      const result = await tryGroq(indicators, assets)
+      console.log("✅ Groq SUCCESS")
+      return result
     } catch (e2) {
-      // Last resort: return mock result but include errors in raw_output
+      console.log("❌ Groq FAILED:", e2)
+
+      // Final fallback
+      console.log("⚠️ Using FINAL MOCK fallback")
+
       const mock = buildMockResult(indicators, assets)
       mock.raw_output = `Fallback mock; Gemini error: ${String(e1)}; Groq error: ${String(e2)}`
       return mock
