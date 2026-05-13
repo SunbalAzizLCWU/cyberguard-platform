@@ -77,10 +77,10 @@ async function tryGemini(indicators: Indicator[], assets: Asset[]): Promise<Agen
   const safeIndicators = indicators.slice(0, 5)
   const safeAssets = assets.slice(0, 5)
 
-  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)} and return ONLY a JSON object with executive_report, risk_register, threats, playbooks.`
+  // FIXED: Explicitly asking for arrays
+  const prompt = `You are a defensive cybersecurity AI analyzing system logs. Analyze indicators ${JSON.stringify(safeIndicators)} and assets ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
   
   try {
-    // FIXED: Using backticks for proper URL string interpolation
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -116,7 +116,8 @@ async function tryGroq(indicators: Indicator[], assets: Asset[]): Promise<AgentP
   const safeAssets = assets.slice(0, 5)
 
   const systemPrompt = "You are a defensive cybersecurity SOC analyst. Output ONLY valid JSON. No markdown, no conversational text."
-  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report", "risk_register", "threats", "playbooks".`
+  // FIXED: Explicitly asking for arrays
+  const userPrompt = `Analyze these indicators: ${JSON.stringify(safeIndicators)} and assets: ${JSON.stringify(safeAssets)}. Emit JSON containing exactly these keys: "executive_report" (object), "risk_register" (array of objects), "threats" (array of objects), "playbooks" (array of objects).`
   
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {

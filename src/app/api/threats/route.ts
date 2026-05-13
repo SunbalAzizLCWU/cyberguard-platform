@@ -45,7 +45,8 @@ async function saveResultsToSupabase(jobId: string, result: any) {
     const now = new Date().toISOString()
     const summary = { threats: 0, risks: 0, incidents: 0, playbooks: 0, reports: 0 }
 
-    const threats: any[] = result.threats ?? []
+    // CRASH FIX: Ensure threats is strictly an Array before iterating
+    const threats: any[] = Array.isArray(result.threats) ? result.threats : []
     for (const t of threats) {
         const { error } = await supabase.from('Threat').insert({
             id:          `thr-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -62,7 +63,8 @@ async function saveResultsToSupabase(jobId: string, result: any) {
         if (!error) summary.threats++
     }
 
-    const riskRegister: any[] = result.risk_register ?? []
+    // CRASH FIX: Ensure riskRegister is strictly an Array before iterating
+    const riskRegister: any[] = Array.isArray(result.risk_register) ? result.risk_register : []
     for (const r of riskRegister) {
         const { error } = await supabase.from('RiskAnalysis').insert({
             id:             `risk-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -96,7 +98,8 @@ async function saveResultsToSupabase(jobId: string, result: any) {
         if (!error) summary.incidents++
     }
 
-    const playbooks: any[] = result.playbooks ?? []
+    // CRASH FIX: Ensure playbooks is strictly an Array before iterating
+    const playbooks: any[] = Array.isArray(result.playbooks) ? result.playbooks : []
     for (const p of playbooks) {
         const { error } = await supabase.from('Playbook').insert({
             id:          `pb-agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -147,8 +150,8 @@ async function pushToSocket(result: any) {
                 event: 'agent:complete',
                 data: {
                     result: {
-                        threats:     result.threats      ?? [],
-                        risk_scores: result.risk_register ?? [],
+                        threats:     Array.isArray(result.threats) ? result.threats : [],
+                        risk_scores: Array.isArray(result.risk_register) ? result.risk_register : [],
                         metrics: {
                             postureScore:   execReport.posture_score                ?? 0,
                             criticalCount:  execReport.severity_summary?.critical   ?? 0,
